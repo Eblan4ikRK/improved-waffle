@@ -76,7 +76,11 @@ export async function middleware(request: NextRequest) {
     return NextResponse.next();
   }
 
-  const ip = request.ip ?? '127.0.0.1';
+  // Извлечение IP из заголовков (для совместимости с TypeScript и разными средами)
+  const ip = (request.headers.get('x-forwarded-for')?.split(',').shift()?.trim() ||
+              request.headers.get('x-real-ip') ||
+              '127.0.0.1') ?? '127.0.0.1';
+
   const country = request.geo?.country;
   const userAgent = request.headers.get('user-agent') || '';
 
