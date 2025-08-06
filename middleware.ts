@@ -3,6 +3,17 @@ import { NextRequest, NextResponse } from 'next/server';
 import { Redis } from '@upstash/redis';
 import { Ratelimit } from '@upstash/ratelimit';
 
+// Extend NextRequest to include geo (Vercel-specific)
+interface ExtendedNextRequest extends NextRequest {
+  geo?: {
+    country?: string;
+    city?: string;
+    region?: string;
+    latitude?: string;
+    longitude?: string;
+  };
+}
+
 // --- НАСТРОЙКИ ---
 
 // 1. Список стран для блокировки (ISO 3166-1 alpha-2)
@@ -71,7 +82,7 @@ if (process.env.UPSTASH_REDIS_REST_URL && process.env.UPSTASH_REDIS_REST_TOKEN) 
 }
 
 // Основная функция Middleware
-export async function middleware(request: NextRequest) {
+export async function middleware(request: ExtendedNextRequest) {
   if (!redis || !ratelimit) {
     return NextResponse.next();
   }
