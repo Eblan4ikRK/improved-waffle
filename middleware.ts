@@ -49,6 +49,21 @@ const INDIVIDUAL_RATE_LIMIT = { requests: 10, window: '10 s' } as const;
 const ATTACK_THRESHOLD = 10000; // 10,000 запросов
 const ATTACK_TIME_WINDOW_SECONDS = 60; // за 60 секунд
 
+// 5. Задержка между уведомлениями об атаке (в секундах)
+const NOTIFICATION_DELAY_SECONDS = 30; // Изменено на 30 секунд, как запрошено
+
+// 6. Список заблокированных ASN (Autonomous System Numbers) для провайдеров вроде VPS/Cloud, часто используемых для атак
+// Примеры: OVH (16276), Hetzner (24940), DataCamp (212238), Amazon AWS (16509), DigitalOcean (14061), Vultr (20473)
+const BLOCKED_ASNS: number[] = [
+  16276,  // OVH
+  24940,  // Hetzner
+  212238, // DataCamp Limited
+  16509,  // Amazon AWS (можно уточнить подсети, если нужно)
+  14061,  // DigitalOcean
+  20473,  // Vultr
+  // Добавьте другие ASN по необходимости (найдите на whois или ipinfo.io)
+];
+
 // --- КОНЕЦ НАСТРОЕК ---
 
 // Инициализация Redis
@@ -115,7 +130,8 @@ export async function middleware(request: ExtendedNextRequest) {
 Приняты автоматические меры по ограничению.`;
 
       await sendTelegramMessage(message);
-      await redis.set('notification_sent_flag', 'true', { ex: ATTACK_TIME_WINDOW_SECONDS });
+      // Установка флага с задержкой в 30 секунд (теперь уведомление отправляется не чаще, чем раз в 30 сек)
+      await redis.set('notification_sent_flag', 'true', { ex: NOTIFICATION_DELAY_SECONDS });
     }
 
     // Optional: Авто-блок при атаке (раскомментируйте)
@@ -130,7 +146,14 @@ export async function middleware(request: ExtendedNextRequest) {
     return new NextResponse(`Access from country ${country} is denied.`, { status: 403 });
   }
 
-  // 4. Блокировка по User-Agent (whitelist)
+  // 4. Блокировка по ASN (новая проверка)
+  const asn = await getAsnForIp(ip, redis);
+  if (asn && BLOCKED_ASNS.includes(asn)) {
+    await incrementBlockedCounter(redis);
+    return new NextResponse(`Access from ASN ${asn} is denied.`, { status: 403 });
+  }
+
+  // 5. Блокировка по User-Agent (whitelist)
   const isAllowedUserAgent = ALLOWED_USER_AGENTS.some(agent => userAgent.includes(agent));
   if (!isAllowedUserAgent) {
     // Optional: Дополнительно blacklist (раскомментируйте)
@@ -141,7 +164,7 @@ export async function middleware(request: ExtendedNextRequest) {
     // }
   }
 
-  // 5. Индивидуальный Rate Limit по IP
+  // 6. Индивидуальный Rate Limit по IP
   const { success } = await ratelimit.limit(ip);
   if (!success) {
     await incrementBlockedCounter(redis);
@@ -194,6 +217,43 @@ async function incrementBlockedCounter(redis: Redis) {
   pipe.incr(blockedKey);
   pipe.expire(blockedKey, ATTACK_TIME_WINDOW_SECONDS, 'NX');
   await pipe.exec().catch(err => console.error('Failed to increment blocked counter:', err));
+}
+
+// Новая функция: Получение ASN по IP с кэшированием в Redis (используем бесплатный API ipapi.co)
+async function getAsnForIp(ip: string, redis: Redis): Promise<number | null> {
+  if (ip === '127.0.0.1' || ip.startsWith('192.168.') || ip === '::1') {
+    return null; // Игнорируем локальные IP
+  }
+
+  const cacheKey = `asn:${ip}`;
+  const cachedAsn = await redis.get(cacheKey);
+
+  if (cachedAsn) {
+    return parseInt(cachedAsn as string, 10);
+  }
+
+  try {
+    // Используем ipapi.co (бесплатно, но с лимитами; для production рассмотрите платный API как ipinfo.io)
+    const response = await fetch(`https://ipapi.co/${ip}/json/`);
+    if (!response.ok) {
+      console.error(`Failed to fetch ASN for IP ${ip}: ${response.statusText}`);
+      return null;
+    }
+
+    const data = await response.json();
+    const asnStr = data.asn; // Например, "AS24940"
+    const asn = asnStr ? parseInt(asnStr.replace('AS', ''), 10) : null;
+
+    if (asn) {
+      // Кэшируем на 1 час (3600 секунд)
+      await redis.set(cacheKey, asn.toString(), { ex: 3600 });
+    }
+
+    return asn;
+  } catch (error) {
+    console.error(`Error fetching ASN for IP ${ip}:`, error);
+    return null;
+  }
 }
 
 async function sendTelegramMessage(text: string) {
